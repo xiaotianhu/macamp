@@ -3,7 +3,7 @@ import Foundation
 struct WebDAVClient {
     let source: LibrarySource
 
-    func listAudioFiles(maxDepth: Int = 6) async throws -> [URL] {
+    func listAudioFiles(maxDepth: Int = 12) async throws -> [URL] {
         var visited = Set<URL>()
         return try await list(source.url, depth: 0, maxDepth: maxDepth, visited: &visited)
     }

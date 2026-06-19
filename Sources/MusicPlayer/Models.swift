@@ -50,7 +50,7 @@ struct Track: Identifiable, Hashable {
         if let sampleRate {
             parts.append("\(sampleRate / 1000) kHz")
         }
-        return parts.isEmpty ? "Local audio" : parts.joined(separator: " / ")
+        return parts.isEmpty ? "Audio" : parts.joined(separator: " / ")
     }
 }
 

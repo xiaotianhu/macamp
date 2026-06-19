@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var player: PlayerEngine
     @State private var showingWebDAV = false
     @State private var isPlaylistExpanded = true
 
@@ -28,6 +29,9 @@ struct ContentView: View {
         .background(WindowConfigurator(size: windowSize))
         .foregroundStyle(WinampColor.text)
         .animation(.easeInOut(duration: 0.26), value: isPlaylistExpanded)
+        .onChange(of: library.tracks) { _, _ in
+            player.refreshMetadata(from: library.tracks)
+        }
         .sheet(isPresented: $showingWebDAV) {
             WebDAVSheet()
                 .environmentObject(library)
@@ -100,6 +104,7 @@ private struct WinampTopDeck: View {
     var body: some View {
         VStack(spacing: 0) {
             WindowChrome()
+                .padding(.horizontal, -18)
                 .padding(.bottom, 12)
 
             HStack(spacing: 16) {
@@ -180,7 +185,7 @@ private struct WindowChrome: View {
         HStack {
             Color.clear.frame(width: 156)
             Spacer()
-            Text("WINAMP")
+            Text("MACAMP")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
             Spacer()
@@ -578,12 +583,17 @@ private struct PlaylistTitleBar: View {
 
 private struct FolderTreeRow: View {
     @EnvironmentObject private var player: PlayerEngine
+    @EnvironmentObject private var library: LibraryStore
     let node: FolderNode
     let depth: Int
     @Binding var expandedFolderIDs: Set<String>
 
     private var isExpanded: Bool {
         expandedFolderIDs.contains(node.id)
+    }
+
+    private var canExpand: Bool {
+        !node.children.isEmpty || !node.files.isEmpty
     }
 
     var body: some View {
@@ -593,11 +603,11 @@ private struct FolderTreeRow: View {
                     .font(.system(size: 11, weight: .black))
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .foregroundStyle(.white)
-                    .opacity(node.children.isEmpty ? 0.25 : 1)
+                    .opacity(canExpand ? 1 : 0.25)
                     .frame(width: 28, height: 30)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if !node.children.isEmpty {
+                        if canExpand {
                             toggle()
                         }
                     }
@@ -626,6 +636,18 @@ private struct FolderTreeRow: View {
             .padding(.trailing, 12)
             .frame(height: 30)
             .background(currentTrackIsInside ? WinampColor.green.opacity(0.10) : .clear)
+            .contextMenu {
+                if let sourceID = node.sourceID {
+                    Button(role: .destructive) {
+                        if node.tracks.contains(where: { $0 == player.currentTrack }) {
+                            player.clearPlayback()
+                        }
+                        library.removeSource(id: sourceID)
+                    } label: {
+                        Label("Delete from Playlist", systemImage: "trash")
+                    }
+                }
+            }
 
             if isExpanded {
                 ForEach(node.children) { child in
@@ -635,7 +657,9 @@ private struct FolderTreeRow: View {
                 ForEach(Array(node.files.enumerated()), id: \.element.id) { index, track in
                     FolderTrackRow(index: index + 1, track: track, selected: player.currentTrack == track, depth: depth + 1)
                         .onTapGesture(count: 2) {
-                            player.play(track, in: node.playQueue(startingAt: track))
+                            let queue = node.playQueue(startingAt: track)
+                            player.play(track, in: queue)
+                            library.loadMetadata(for: node.tracks)
                         }
                 }
             }
@@ -658,6 +682,7 @@ private struct FolderTreeRow: View {
     private func playFolder() {
         guard let first = node.tracks.first else { return }
         player.play(first, in: node.tracks)
+        library.loadMetadata(for: node.tracks)
     }
 }
 
@@ -832,6 +857,7 @@ private enum WinampColor {
 private struct FolderNode: Identifiable {
     let id: String
     let name: String
+    let sourceID: UUID?
     let children: [FolderNode]
     let files: [Track]
     let tracks: [Track]
@@ -846,7 +872,7 @@ private struct FolderNode: Identifiable {
             let sourceTracks = tracks
                 .filter { $0.sourceID == source.id }
                 .sortedByPlaybackPath()
-            let builder = FolderNodeBuilder(id: source.id.uuidString, name: source.title)
+            let builder = FolderNodeBuilder(id: source.id.uuidString, name: source.title, sourceID: source.id)
             for track in sourceTracks {
                 builder.insert(track, components: relativeComponents(for: track, source: source))
             }
@@ -882,12 +908,14 @@ private struct FolderNode: Identifiable {
 private final class FolderNodeBuilder {
     let id: String
     let name: String
+    let sourceID: UUID?
     private var childrenByName: [String: FolderNodeBuilder] = [:]
     private var files: [Track] = []
 
-    init(id: String, name: String) {
+    init(id: String, name: String, sourceID: UUID? = nil) {
         self.id = id
         self.name = name
+        self.sourceID = sourceID
     }
 
     func insert(_ track: Track, components: [String]) {
@@ -911,7 +939,7 @@ private final class FolderNodeBuilder {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let sortedFiles = files.sortedByPlaybackPath()
         let tracks = (children.flatMap(\.tracks) + sortedFiles).sortedByPlaybackPath()
-        return FolderNode(id: id, name: name, children: children, files: sortedFiles, tracks: tracks)
+        return FolderNode(id: id, name: name, sourceID: sourceID, children: children, files: sortedFiles, tracks: tracks)
     }
 }
 

@@ -87,6 +87,14 @@ final class PlayerEngine: ObservableObject {
         spectrumLevels = Array(repeating: 0.18, count: spectrumBarCount)
     }
 
+    func clearPlayback() {
+        stop()
+        queue = []
+        currentIndex = nil
+        currentTrack = nil
+        amplitudeEnvelope = []
+    }
+
     func next() {
         guard let currentIndex, !queue.isEmpty else { return }
         let index: Int
@@ -119,6 +127,19 @@ final class PlayerEngine: ObservableObject {
         volume = min(1, max(0, value))
         player?.volume = Float(volume)
         SystemOutputVolume.write(Float(volume))
+    }
+
+    func refreshMetadata(from tracks: [Track]) {
+        let tracksByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        queue = queue.map { tracksByID[$0.id] ?? $0 }
+
+        guard let current = currentTrack,
+              let updated = tracksByID[current.id],
+              updated != current else {
+            return
+        }
+        currentTrack = updated
+        currentIndex = queue.firstIndex(of: updated)
     }
 
     func toggleShuffle() {
@@ -173,6 +194,10 @@ final class PlayerEngine: ObservableObject {
 
     private func analyze(_ track: Track) {
         analysisTask?.cancel()
+        guard track.url.isFileURL else {
+            amplitudeEnvelope = []
+            return
+        }
         let url = track.url
         let authorizationHeader = track.authorizationHeader
         analysisTask = Task.detached(priority: .utility) {

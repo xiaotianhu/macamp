@@ -13,6 +13,10 @@ final class LibraryStore: ObservableObject {
 
     private let sourcesKey = "MusicPlayer.sources.v1"
     private let bookmarkPrefix = "MusicPlayer.bookmark."
+    private var didLoad = false
+    private var scanGeneration = 0
+    private var scanTask: Task<Void, Never>?
+    private var metadataTask: Task<Void, Never>?
 
     var filteredTracks: [Track] {
         let sourceFiltered = selectedSourceID.map { id in tracks.filter { $0.sourceID == id } } ?? tracks
@@ -45,12 +49,14 @@ final class LibraryStore: ObservableObject {
             }
     }
 
-    func load() async {
+    func loadIfNeeded() {
+        guard !didLoad else { return }
+        didLoad = true
         if let data = UserDefaults.standard.data(forKey: sourcesKey),
            let decoded = try? JSONDecoder().decode([LibrarySource].self, from: data) {
             sources = decoded
         }
-        await rescan()
+        rescanInBackground()
     }
 
     func addLocalFolder() {
@@ -72,7 +78,7 @@ final class LibraryStore: ObservableObject {
             sources.append(source)
         }
         persistSources()
-        Task { await rescan() }
+        rescanInBackground()
     }
 
     func addWebDAV(url: URL, username: String, password: String) {
@@ -86,7 +92,7 @@ final class LibraryStore: ObservableObject {
             )
         )
         persistSources()
-        Task { await rescan() }
+        rescanInBackground()
     }
 
     func removeSources(at offsets: IndexSet) {
@@ -95,10 +101,25 @@ final class LibraryStore: ObservableObject {
         }
         sources.remove(atOffsets: offsets)
         persistSources()
-        Task { await rescan() }
+        rescanInBackground()
+    }
+
+    func removeSource(id sourceID: UUID) {
+        guard sources.contains(where: { $0.id == sourceID }) else { return }
+        scanTask?.cancel()
+        metadataTask?.cancel()
+        UserDefaults.standard.removeObject(forKey: bookmarkPrefix + sourceID.uuidString)
+        sources.removeAll { $0.id == sourceID }
+        tracks.removeAll { $0.sourceID == sourceID }
+        if selectedSourceID == sourceID {
+            selectedSourceID = nil
+        }
+        persistSources()
     }
 
     func clearLibrary() {
+        scanTask?.cancel()
+        metadataTask?.cancel()
         for source in sources {
             UserDefaults.standard.removeObject(forKey: bookmarkPrefix + source.id.uuidString)
         }
@@ -109,24 +130,43 @@ final class LibraryStore: ObservableObject {
         persistSources()
     }
 
-    func rescan() async {
-        guard !isScanning else { return }
+    private func rescanInBackground() {
+        scanTask?.cancel()
+        scanGeneration += 1
+        let generation = scanGeneration
         isScanning = true
-        defer { isScanning = false }
+        scanTask = Task { [weak self] in
+            await self?.rescan(generation: generation)
+        }
+    }
+
+    private func rescan(generation: Int) async {
+        let scanSources = sources
+        isScanning = true
+        metadataTask?.cancel()
+        defer {
+            if generation == scanGeneration {
+                isScanning = false
+            }
+        }
 
         var all: [Track] = []
-        for source in sources {
+        for source in scanSources {
+            guard generation == scanGeneration, !Task.isCancelled else { return }
             do {
                 switch source.kind {
                 case .local:
                     all.append(contentsOf: await scanLocal(source))
                 case .webDAV:
-                    all.append(contentsOf: try await scanWebDAV(source))
+                    all.append(contentsOf: try await scanWebDAVFast(source))
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                if !Task.isCancelled, (error as? URLError)?.code != .cancelled {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
+        guard generation == scanGeneration, !Task.isCancelled else { return }
         tracks = all.sorted {
             [$0.artist, $0.album, $0.title].joined(separator: "\u{0}")
                 .localizedStandardCompare([$1.artist, $1.album, $1.title].joined(separator: "\u{0}")) == .orderedAscending
@@ -173,14 +213,73 @@ final class LibraryStore: ObservableObject {
         }.value
     }
 
-    private nonisolated func scanWebDAV(_ source: LibrarySource) async throws -> [Track] {
+    private nonisolated func scanWebDAVFast(_ source: LibrarySource) async throws -> [Track] {
         let urls = try await WebDAVClient(source: source).listAudioFiles()
-        var tracks: [Track] = []
-        for url in urls {
-            tracks.append(await makeTrack(url: url, source: source))
-        }
-        return tracks
+        return urls.map { url in makeBareTrack(url: url, source: source) }
     }
+
+    func loadMetadata(for selectedTracks: [Track]) {
+        let selectedIDs = Set(selectedTracks.map(\.id))
+        let pending = tracks
+            .filter { selectedIDs.contains($0.id) && ($0.duration == nil || $0.bitRate == nil || $0.sampleRate == nil) }
+            .map { (id: $0.id, url: $0.url, authHeader: $0.authorizationHeader) }
+        guard !pending.isEmpty else { return }
+
+        metadataTask?.cancel()
+        metadataTask = Task.detached(priority: .background) { [weak self] in
+            for item in pending {
+                guard !Task.isCancelled else { break }
+                let metadata = await AudioMetadataReader.read(url: item.url, authorizationHeader: item.authHeader)
+                guard !Task.isCancelled else { break }
+                await MainActor.run { [weak self] in
+                    self?.updateTrackMetadata(id: item.id, metadata: metadata)
+                }
+            }
+        }
+    }
+
+    private func updateTrackMetadata(id: String, metadata: AudioMetadataReader.Metadata) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        let old = tracks[index]
+        tracks[index] = Track(
+            id: old.id,
+            title: old.title,
+            artist: old.artist,
+            album: old.album,
+            year: old.year,
+            duration: metadata.duration,
+            bitRate: metadata.bitRate,
+            sampleRate: metadata.sampleRate,
+            url: old.url,
+            sourceID: old.sourceID,
+            authorizationHeader: old.authorizationHeader
+        )
+    }
+}
+
+private nonisolated func makeBareTrack(url: URL, source: LibrarySource) -> Track {
+    let cleanTitle = url.deletingPathExtension().lastPathComponent
+    let authorizationHeader: String?
+    if let username = source.username, let password = source.password {
+        let token = Data("\(username):\(password)".utf8).base64EncodedString()
+        authorizationHeader = "Basic \(token)"
+    } else {
+        authorizationHeader = nil
+    }
+
+    return Track(
+        id: "\(source.id.uuidString)-\(url.absoluteString)",
+        title: cleanTitle,
+        artist: source.title,
+        album: url.deletingLastPathComponent().lastPathComponent.isEmpty ? source.title : url.deletingLastPathComponent().lastPathComponent,
+        year: "",
+        duration: nil,
+        bitRate: nil,
+        sampleRate: nil,
+        url: url,
+        sourceID: source.id,
+        authorizationHeader: authorizationHeader
+    )
 }
 
 private nonisolated func makeTrack(url: URL, source: LibrarySource) async -> Track {

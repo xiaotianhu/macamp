@@ -19,8 +19,8 @@ struct MusicPlayerApp: App {
             ContentView()
                 .environmentObject(library)
                 .environmentObject(player)
-                .task {
-                    await library.load()
+                .onAppear {
+                    library.loadIfNeeded()
                 }
         }
         .windowStyle(.hiddenTitleBar)
