@@ -1,0 +1,20 @@
+# Swift Package Manager
+.build/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+
+# Audio files (don't commit test music)
+*.mp3
+*.flac
+*.aac
+*.m4a
+*.ogg
+*.wav
+*.aiff
+*.alac
+*.caf
