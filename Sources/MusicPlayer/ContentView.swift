@@ -704,6 +704,7 @@ private struct FolderTrackRow: View {
 
             Text(track.title)
                 .lineLimit(1)
+                .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(track.durationText)

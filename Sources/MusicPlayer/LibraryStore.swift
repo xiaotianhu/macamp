@@ -258,7 +258,6 @@ final class LibraryStore: ObservableObject {
 }
 
 private nonisolated func makeBareTrack(url: URL, source: LibrarySource) -> Track {
-    let cleanTitle = url.deletingPathExtension().lastPathComponent
     let authorizationHeader: String?
     if let username = source.username, let password = source.password {
         let token = Data("\(username):\(password)".utf8).base64EncodedString()
@@ -269,7 +268,7 @@ private nonisolated func makeBareTrack(url: URL, source: LibrarySource) -> Track
 
     return Track(
         id: "\(source.id.uuidString)-\(url.absoluteString)",
-        title: cleanTitle,
+        title: url.lastPathComponent,
         artist: source.title,
         album: url.deletingLastPathComponent().lastPathComponent.isEmpty ? source.title : url.deletingLastPathComponent().lastPathComponent,
         year: "",
@@ -283,7 +282,6 @@ private nonisolated func makeBareTrack(url: URL, source: LibrarySource) -> Track
 }
 
 private nonisolated func makeTrack(url: URL, source: LibrarySource) async -> Track {
-    let cleanTitle = url.deletingPathExtension().lastPathComponent
     let authorizationHeader: String?
     if let username = source.username, let password = source.password {
         let token = Data("\(username):\(password)".utf8).base64EncodedString()
@@ -295,7 +293,7 @@ private nonisolated func makeTrack(url: URL, source: LibrarySource) async -> Tra
 
     return Track(
         id: "\(source.id.uuidString)-\(url.absoluteString)",
-        title: cleanTitle,
+        title: url.lastPathComponent,
         artist: source.title,
         album: url.deletingLastPathComponent().lastPathComponent.isEmpty ? source.title : url.deletingLastPathComponent().lastPathComponent,
         year: "",
