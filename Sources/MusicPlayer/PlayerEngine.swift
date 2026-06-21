@@ -3,6 +3,13 @@ import Combine
 import CoreAudio
 import Foundation
 
+private struct StoredPlaybackState: Codable {
+    var currentTrackID: String
+    var queueIDs: [String]
+    var isShuffleEnabled: Bool
+    var isRepeatEnabled: Bool
+}
+
 @MainActor
 final class PlayerEngine: ObservableObject {
     @Published private(set) var currentTrack: Track?
@@ -21,9 +28,12 @@ final class PlayerEngine: ObservableObject {
     private var amplitudeEnvelope: [Double] = []
     private let spectrumBarCount = 24
     private let envelopeRate = 30.0
+    private var didRestore = false
+    private static let playbackStateKey = "MusicPlayer.playbackState.v1"
 
     init() {
         volume = Double(SystemOutputVolume.read() ?? 0.66)
+        loadStateFromDisk()
     }
 
     deinit {
@@ -65,6 +75,7 @@ final class PlayerEngine: ObservableObject {
         player?.play()
         isPlaying = true
         analyze(track)
+        savePlaybackState()
     }
 
     func togglePlayPause() {
@@ -93,6 +104,7 @@ final class PlayerEngine: ObservableObject {
         currentIndex = nil
         currentTrack = nil
         amplitudeEnvelope = []
+        clearSavedState()
     }
 
     func next() {
@@ -147,6 +159,7 @@ final class PlayerEngine: ObservableObject {
         if isShuffleEnabled {
             isRepeatEnabled = false
         }
+        savePlaybackState()
     }
 
     func toggleRepeat() {
@@ -154,6 +167,57 @@ final class PlayerEngine: ObservableObject {
         if isRepeatEnabled {
             isShuffleEnabled = false
         }
+        savePlaybackState()
+    }
+
+    func tryRestore(from tracks: [Track]) {
+        guard !didRestore, currentTrack == nil, !tracks.isEmpty else { return }
+        guard let data = UserDefaults.standard.data(forKey: Self.playbackStateKey),
+              let state = try? JSONDecoder().decode(StoredPlaybackState.self, from: data) else {
+            didRestore = true
+            return
+        }
+        let trackByID = Dictionary(uniqueKeysWithValues: tracks.map { ($0.id, $0) })
+        guard let target = trackByID[state.currentTrackID] else {
+            didRestore = true
+            return
+        }
+        let restoredQueue = state.queueIDs.compactMap { trackByID[$0] }
+        guard !restoredQueue.isEmpty else {
+            didRestore = true
+            return
+        }
+        didRestore = true
+        isShuffleEnabled = state.isShuffleEnabled
+        isRepeatEnabled = state.isRepeatEnabled
+        play(target, in: restoredQueue)
+    }
+
+    private func savePlaybackState() {
+        guard let currentTrack else {
+            clearSavedState()
+            return
+        }
+        let state = StoredPlaybackState(
+            currentTrackID: currentTrack.id,
+            queueIDs: queue.map(\.id),
+            isShuffleEnabled: isShuffleEnabled,
+            isRepeatEnabled: isRepeatEnabled
+        )
+        if let data = try? JSONEncoder().encode(state) {
+            UserDefaults.standard.set(data, forKey: Self.playbackStateKey)
+        }
+    }
+
+    private func clearSavedState() {
+        UserDefaults.standard.removeObject(forKey: Self.playbackStateKey)
+    }
+
+    private func loadStateFromDisk() {
+        guard let data = UserDefaults.standard.data(forKey: Self.playbackStateKey),
+              let state = try? JSONDecoder().decode(StoredPlaybackState.self, from: data) else { return }
+        isShuffleEnabled = state.isShuffleEnabled
+        isRepeatEnabled = state.isRepeatEnabled
     }
 
     var remainingText: String {

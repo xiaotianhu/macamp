@@ -29,8 +29,9 @@ struct ContentView: View {
         .background(WindowConfigurator(size: windowSize))
         .foregroundStyle(WinampColor.text)
         .animation(.easeInOut(duration: 0.26), value: isPlaylistExpanded)
-        .onChange(of: library.tracks) { _, _ in
-            player.refreshMetadata(from: library.tracks)
+        .onChange(of: library.tracks) { _, tracks in
+            player.refreshMetadata(from: tracks)
+            player.tryRestore(from: tracks)
         }
         .sheet(isPresented: $showingWebDAV) {
             WebDAVSheet()
@@ -487,15 +488,7 @@ private struct WinampPlaylist: View {
     @Binding var showingWebDAV: Bool
     @Binding var isExpanded: Bool
     @State private var expandedFolderIDs = Set<String>()
-    @State private var initializedExpansion = false
-
-    private var folderTrees: [FolderNode] {
-        FolderNode.makeTrees(sources: library.sources, tracks: library.tracks)
-    }
-
-    private var rootIDs: [String] {
-        folderTrees.map(\.id)
-    }
+    @State private var cachedFolderTrees: [FolderNode] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -504,7 +497,7 @@ private struct WinampPlaylist: View {
             if isExpanded {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(folderTrees) { node in
+                        ForEach(cachedFolderTrees) { node in
                             FolderTreeRow(node: node, depth: 0, expandedFolderIDs: $expandedFolderIDs)
                         }
                     }
@@ -542,18 +535,24 @@ private struct WinampPlaylist: View {
         .background(WinampColor.panel.opacity(0.62))
         .animation(.easeInOut(duration: 0.26), value: isExpanded)
         .onAppear {
+            rebuildTree()
             initializeExpansionIfNeeded()
         }
-        .onChange(of: rootIDs) { _, _ in
-            initializedExpansion = false
-            initializeExpansionIfNeeded()
+        .onChange(of: library.tracks.map(\.id)) { _, _ in
+            rebuildTree()
+        }
+        .onChange(of: library.sources.map(\.id)) { _, _ in
+            rebuildTree()
         }
     }
 
+    private func rebuildTree() {
+        cachedFolderTrees = FolderNode.makeTrees(sources: library.sources, tracks: library.tracks)
+        initializeExpansionIfNeeded()
+    }
+
     private func initializeExpansionIfNeeded() {
-        guard !initializedExpansion else { return }
-        expandedFolderIDs.formUnion(rootIDs)
-        initializedExpansion = true
+        expandedFolderIDs.formUnion(cachedFolderTrees.map(\.id))
     }
 }
 
@@ -668,7 +667,7 @@ private struct FolderTreeRow: View {
 
     private var currentTrackIsInside: Bool {
         guard let currentTrack = player.currentTrack else { return false }
-        return node.tracks.contains(currentTrack)
+        return node.containsTrack(currentTrack.id)
     }
 
     private func toggle() {
@@ -855,17 +854,22 @@ private enum WinampColor {
     static let blue = Color(red: 0.24, green: 0.45, blue: 1.00)
 }
 
-private struct FolderNode: Identifiable {
+private struct FolderNode: Identifiable, Equatable {
     let id: String
     let name: String
     let sourceID: UUID?
     let children: [FolderNode]
     let files: [Track]
     let tracks: [Track]
+    let trackIDs: Set<String>
 
     func playQueue(startingAt track: Track) -> [Track] {
         guard let index = tracks.firstIndex(of: track) else { return tracks }
         return Array(tracks[index...]) + Array(tracks[..<index])
+    }
+
+    func containsTrack(_ trackID: String) -> Bool {
+        trackIDs.contains(trackID)
     }
 
     static func makeTrees(sources: [LibrarySource], tracks: [Track]) -> [FolderNode] {
@@ -940,7 +944,11 @@ private final class FolderNodeBuilder {
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let sortedFiles = files.sortedByPlaybackPath()
         let tracks = (children.flatMap(\.tracks) + sortedFiles).sortedByPlaybackPath()
-        return FolderNode(id: id, name: name, sourceID: sourceID, children: children, files: sortedFiles, tracks: tracks)
+        return FolderNode(
+            id: id, name: name, sourceID: sourceID,
+            children: children, files: sortedFiles, tracks: tracks,
+            trackIDs: Set(tracks.map(\.id))
+        )
     }
 }
 
