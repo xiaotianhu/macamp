@@ -512,11 +512,11 @@ private struct WinampPlaylist: View {
                         .stroke(.white.opacity(0.035), lineWidth: 1)
                 )
                 .overlay(alignment: .center) {
-                    if library.isScanning {
+                    if library.isScanning && library.tracks.isEmpty {
                         ProgressView("Scanning")
                             .padding(14)
                             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    } else if library.tracks.isEmpty {
+                    } else if !library.isScanning && library.tracks.isEmpty {
                         Text("ADD LOCAL FOLDER OR WEBDAV SOURCE")
                             .font(.system(size: 12, weight: .semibold, design: .monospaced))
                             .foregroundStyle(WinampColor.dim)
@@ -741,6 +741,17 @@ private struct PlaylistFooter: View {
             .buttonStyle(SmallBezelButtonStyle())
 
             Spacer()
+
+            if library.isScanning && !library.tracks.isEmpty {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .scaleEffect(0.55)
+                        .frame(width: 12, height: 12)
+                    Text("Refresh")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(WinampColor.dim)
+                }
+            }
 
             Text("\(library.tracks.count)")
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))

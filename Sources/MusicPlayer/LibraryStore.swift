@@ -18,6 +18,13 @@ final class LibraryStore: ObservableObject {
     private var scanTask: Task<Void, Never>?
     private var metadataTask: Task<Void, Never>?
 
+    private var tracksCacheURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("MusicPlayer")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("tracks.json")
+    }
+
     var filteredTracks: [Track] {
         let sourceFiltered = selectedSourceID.map { id in tracks.filter { $0.sourceID == id } } ?? tracks
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -56,6 +63,7 @@ final class LibraryStore: ObservableObject {
            let decoded = try? JSONDecoder().decode([LibrarySource].self, from: data) {
             sources = decoded
         }
+        loadTracksCache()
         rescanInBackground()
     }
 
@@ -128,6 +136,7 @@ final class LibraryStore: ObservableObject {
         searchText = ""
         selectedSourceID = nil
         persistSources()
+        try? FileManager.default.removeItem(at: tracksCacheURL)
     }
 
     private func rescanInBackground() {
@@ -171,12 +180,24 @@ final class LibraryStore: ObservableObject {
             [$0.artist, $0.album, $0.title].joined(separator: "\u{0}")
                 .localizedStandardCompare([$1.artist, $1.album, $1.title].joined(separator: "\u{0}")) == .orderedAscending
         }
+        saveTracksCache()
     }
 
     private func persistSources() {
         if let data = try? JSONEncoder().encode(sources) {
             UserDefaults.standard.set(data, forKey: sourcesKey)
         }
+    }
+
+    private func saveTracksCache() {
+        guard let data = try? JSONEncoder().encode(tracks) else { return }
+        try? data.write(to: tracksCacheURL, options: .atomic)
+    }
+
+    private func loadTracksCache() {
+        guard let data = try? Data(contentsOf: tracksCacheURL),
+              let cached = try? JSONDecoder().decode([Track].self, from: data) else { return }
+        tracks = cached
     }
 
     private nonisolated func scanLocal(_ source: LibrarySource) async -> [Track] {
