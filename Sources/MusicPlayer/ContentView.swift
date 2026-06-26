@@ -63,39 +63,58 @@ private enum WinampWindowMetrics {
 private struct WindowConfigurator: NSViewRepresentable {
     let size: CGSize
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
-            configure(window: view.window)
+            configure(window: view.window, coordinator: context.coordinator)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            configure(window: nsView.window)
+            configure(window: nsView.window, coordinator: context.coordinator)
         }
     }
 
-    private func configure(window: NSWindow?) {
+    private func configure(window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
-        window.styleMask = [.borderless]
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = false
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.minSize = size
-        window.maxSize = size
-        let currentFrame = window.frame
-        let newFrame = NSRect(
-            x: currentFrame.minX,
-            y: currentFrame.maxY - size.height,
-            width: size.width,
-            height: size.height
-        )
-        window.setFrame(newFrame, display: true, animate: false)
+
+        if !coordinator.didApplyStaticConfig {
+            window.styleMask = [.borderless]
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = false
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = true
+            coordinator.didApplyStaticConfig = true
+        }
+
+        if coordinator.lastSize != size {
+            window.minSize = size
+            window.maxSize = size
+            let currentFrame = window.frame
+            let newFrame = NSRect(
+                x: currentFrame.minX,
+                y: currentFrame.maxY - size.height,
+                width: size.width,
+                height: size.height
+            )
+            if currentFrame.size != size || currentFrame.origin.y != newFrame.origin.y {
+                window.setFrame(newFrame, display: true, animate: false)
+            }
+            coordinator.lastSize = size
+        }
+    }
+
+    final class Coordinator {
+        var didApplyStaticConfig = false
+        var lastSize: CGSize?
     }
 }
 
@@ -109,11 +128,11 @@ private struct WinampTopDeck: View {
                 .padding(.bottom, 12)
 
             HStack(spacing: 16) {
-                MeterPanel()
+                MeterPanel(clock: player.clock)
                     .frame(width: 158, height: 96)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    ScrollingTitleText(text: "1. \(player.currentTrack?.artistTitle ?? "No Track Selected")")
+                    StaticTitleText(text: "1. \(player.currentTrack?.artistTitle ?? "No Track Selected")")
                         .frame(height: 21)
 
                     HStack(spacing: 14) {
@@ -137,7 +156,7 @@ private struct WinampTopDeck: View {
 
             VStack(spacing: 0) {
                 Color.clear.frame(height: 38)
-                ProgressStrip(value: progress) { value in
+                PlaybackProgressControl(clock: player.clock) { value in
                     player.seek(to: value)
                 }
             }
@@ -173,11 +192,6 @@ private struct WinampTopDeck: View {
                 endPoint: .bottom
             )
         )
-    }
-
-    private var progress: Double {
-        guard let duration = player.currentTrack?.duration, duration > 0 else { return 0.08 }
-        return min(1, max(0, player.elapsed / duration))
     }
 }
 
@@ -238,48 +252,87 @@ private final class WindowDragView: NSView {
 }
 
 private struct MeterPanel: View {
-    @EnvironmentObject private var player: PlayerEngine
+    @ObservedObject var clock: PlaybackClock
 
     var body: some View {
-        VStack(spacing: 9) {
-            Text(player.elapsedText)
-                .font(.system(size: 42, weight: .light, design: .monospaced))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .contentTransition(.numericText())
-
-            SpectrumBars(levels: player.spectrumLevels)
-                .frame(width: 140, height: 44, alignment: .bottomTrailing)
-                .frame(maxWidth: .infinity, alignment: .center)
+        ZStack {
+            DotMatrixText(text: clock.elapsedText)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 11)
-        .background(
-            LinearGradient(colors: [WinampColor.recessTop, WinampColor.recess], startPoint: .top, endPoint: .bottom),
-            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-        )
+        .padding(.horizontal, 4)
     }
 }
 
-private struct SpectrumBars: View {
-    let levels: [Double]
+private struct DotMatrixText: View {
+    let text: String
+    private let dotSize: CGFloat = 3.8
+    private let dotSpacing: CGFloat = 2.8
+    private let characterSpacing: CGFloat = 5
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 3) {
-            ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.92), .white.opacity(0.38)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: 4, height: 6 + level * 35)
+        HStack(alignment: .center, spacing: characterSpacing) {
+            ForEach(Array(text.enumerated()), id: \.offset) { _, character in
+                DotMatrixGlyph(character: character, dotSize: dotSize, dotSpacing: dotSpacing)
             }
         }
-        .frame(width: 140, height: 44, alignment: .bottomTrailing)
-        .clipped()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+}
+
+private struct DotMatrixGlyph: View {
+    let character: Character
+    let dotSize: CGFloat
+    let dotSpacing: CGFloat
+
+    private var rows: [String] {
+        switch character {
+        case "0":
+            return ["01110", "10001", "10011", "10101", "11001", "10001", "01110"]
+        case "1":
+            return ["00100", "01100", "00100", "00100", "00100", "00100", "01110"]
+        case "2":
+            return ["01110", "10001", "00001", "00010", "00100", "01000", "11111"]
+        case "3":
+            return ["11110", "00001", "00001", "01110", "00001", "00001", "11110"]
+        case "4":
+            return ["00010", "00110", "01010", "10010", "11111", "00010", "00010"]
+        case "5":
+            return ["11111", "10000", "10000", "11110", "00001", "00001", "11110"]
+        case "6":
+            return ["01110", "10000", "10000", "11110", "10001", "10001", "01110"]
+        case "7":
+            return ["11111", "00001", "00010", "00100", "01000", "01000", "01000"]
+        case "8":
+            return ["01110", "10001", "10001", "01110", "10001", "10001", "01110"]
+        case "9":
+            return ["01110", "10001", "10001", "01111", "00001", "00001", "01110"]
+        case ":":
+            return ["0", "1", "1", "0", "1", "1", "0"]
+        default:
+            return ["000", "000", "000", "000", "000", "000", "000"]
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: dotSpacing) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: dotSpacing) {
+                    ForEach(Array(row.enumerated()), id: \.offset) { _, value in
+                        Circle()
+                            .fill(value == "1" ? .white : .clear)
+                            .frame(width: dotSize, height: dotSize)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PlaybackProgressControl: View {
+    @ObservedObject var clock: PlaybackClock
+    let onChange: (Double) -> Void
+
+    var body: some View {
+        ProgressStrip(value: clock.progress, onChange: onChange)
     }
 }
 
@@ -302,40 +355,16 @@ private struct Badge: View {
     }
 }
 
-private struct ScrollingTitleText: View {
+private struct StaticTitleText: View {
     let text: String
-    private let speed: Double = 34
-    private let pause: Double = 1
 
     var body: some View {
-        GeometryReader { proxy in
-            let estimatedTextWidth = max(proxy.size.width, Double(text.count) * 8.4)
-            let overflow = max(0, estimatedTextWidth - proxy.size.width)
-
-            if overflow < 6 {
-                Text(text)
-                    .font(.system(size: 16, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                    let travelDuration = overflow / speed
-                    let cycleDuration = travelDuration + pause
-                    let time = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycleDuration)
-                    let offset = time < pause ? 0 : min(overflow, (time - pause) * speed)
-
-                    Text(text)
-                        .font(.system(size: 16, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .offset(x: -offset)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .clipped()
-            }
-        }
+        Text(text)
+            .font(.system(size: 16, weight: .medium, design: .rounded))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -383,7 +412,7 @@ private struct ProgressStrip: View {
                     .frame(height: 7)
                 Capsule()
                     .fill(.white)
-                    .frame(width: max(38, proxy.size.width * value), height: 7)
+                    .frame(width: proxy.size.width * value, height: 7)
             }
             .contentShape(Rectangle())
             .gesture(
@@ -638,7 +667,7 @@ private struct FolderTreeRow: View {
             .contextMenu {
                 if let sourceID = node.sourceID {
                     Button(role: .destructive) {
-                        if node.tracks.contains(where: { $0 == player.currentTrack }) {
+                        if node.tracks.contains(where: { $0.id == player.currentTrack?.id }) {
                             player.clearPlayback()
                         }
                         library.removeSource(id: sourceID)
@@ -654,7 +683,7 @@ private struct FolderTreeRow: View {
                 }
 
                 ForEach(Array(node.files.enumerated()), id: \.element.id) { index, track in
-                    FolderTrackRow(index: index + 1, track: track, selected: player.currentTrack == track, depth: depth + 1)
+                    FolderTrackRow(index: index + 1, track: track, selected: player.currentTrack?.id == track.id, depth: depth + 1)
                         .onTapGesture(count: 2) {
                             let queue = node.playQueue(startingAt: track)
                             player.play(track, in: queue)
@@ -873,6 +902,10 @@ private struct FolderNode: Identifiable, Equatable {
     let files: [Track]
     let tracks: [Track]
     let trackIDs: Set<String>
+
+    static func == (lhs: FolderNode, rhs: FolderNode) -> Bool {
+        lhs.id == rhs.id && lhs.trackIDs == rhs.trackIDs
+    }
 
     func playQueue(startingAt track: Track) -> [Track] {
         guard let index = tracks.firstIndex(of: track) else { return tracks }

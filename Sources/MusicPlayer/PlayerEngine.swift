@@ -1,5 +1,4 @@
 import AVFoundation
-import Combine
 import CoreAudio
 import Foundation
 
@@ -11,23 +10,44 @@ private struct StoredPlaybackState: Codable {
 }
 
 @MainActor
+final class PlaybackClock: ObservableObject {
+    @Published private(set) var elapsed: TimeInterval = 0
+    @Published private(set) var progress: Double = 0
+
+    var elapsedText: String {
+        let total = max(0, Int(elapsed.rounded()))
+        let minutes = total / 60
+        let seconds = total % 60
+        if minutes >= 100 {
+            return "\(minutes):\(String(format: "%02d", seconds))"
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    func update(elapsed: TimeInterval, progress: Double) {
+        self.elapsed = elapsed
+        self.progress = progress
+    }
+
+    func reset() {
+        update(elapsed: 0, progress: 0)
+    }
+}
+
+@MainActor
 final class PlayerEngine: ObservableObject {
     @Published private(set) var currentTrack: Track?
     @Published private(set) var isPlaying = false
-    @Published var elapsed: TimeInterval = 0
     @Published private(set) var volume: Double
     @Published private(set) var isShuffleEnabled = false
     @Published private(set) var isRepeatEnabled = false
-    @Published private(set) var spectrumLevels: [Double] = Array(repeating: 0.16, count: 24)
+    let clock = PlaybackClock()
 
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var queue: [Track] = []
     private var currentIndex: Int?
-    private var analysisTask: Task<Void, Never>?
-    private var amplitudeEnvelope: [Double] = []
-    private let spectrumBarCount = 24
-    private let envelopeRate = 30.0
+    private let playbackRefreshInterval = 1.0
     private var didRestore = false
     private static let playbackStateKey = "MusicPlayer.playbackState.v1"
 
@@ -40,16 +60,13 @@ final class PlayerEngine: ObservableObject {
         if let timeObserver {
             player?.removeTimeObserver(timeObserver)
         }
-        analysisTask?.cancel()
     }
 
     func play(_ track: Track, in tracks: [Track]) {
         queue = tracks
         currentIndex = tracks.firstIndex(of: track)
         currentTrack = track
-        elapsed = 0
-        amplitudeEnvelope = []
-        spectrumLevels = fallbackSpectrum(at: 0)
+        clock.reset()
 
         if let timeObserver {
             player?.removeTimeObserver(timeObserver)
@@ -58,11 +75,14 @@ final class PlayerEngine: ObservableObject {
         let item = makePlayerItem(for: track)
         player = AVPlayer(playerItem: item)
         player?.volume = Float(volume)
-        timeObserver = player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600), queue: .main) { [weak self] time in
+        timeObserver = player?.addPeriodicTimeObserver(forInterval: CMTime(seconds: playbackRefreshInterval, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
-                self.elapsed = time.seconds.isFinite ? time.seconds : 0
-                self.updateSpectrum()
+                let seconds = time.seconds
+                if seconds.isFinite {
+                    let elapsed = max(0, seconds)
+                    self.clock.update(elapsed: elapsed, progress: self.progressValue(for: elapsed))
+                }
             }
         }
         NotificationCenter.default.addObserver(
@@ -74,7 +94,6 @@ final class PlayerEngine: ObservableObject {
 
         player?.play()
         isPlaying = true
-        analyze(track)
         savePlaybackState()
     }
 
@@ -83,7 +102,7 @@ final class PlayerEngine: ObservableObject {
         if isPlaying {
             player.pause()
             isPlaying = false
-            spectrumLevels = Array(repeating: 0.18, count: spectrumBarCount)
+            syncElapsedFromPlayer()
         } else {
             player.play()
             isPlaying = true
@@ -94,8 +113,7 @@ final class PlayerEngine: ObservableObject {
         player?.pause()
         player?.seek(to: .zero)
         isPlaying = false
-        elapsed = 0
-        spectrumLevels = Array(repeating: 0.18, count: spectrumBarCount)
+        clock.reset()
     }
 
     func clearPlayback() {
@@ -103,7 +121,6 @@ final class PlayerEngine: ObservableObject {
         queue = []
         currentIndex = nil
         currentTrack = nil
-        amplitudeEnvelope = []
         clearSavedState()
     }
 
@@ -128,11 +145,10 @@ final class PlayerEngine: ObservableObject {
     }
 
     func seek(to progress: Double) {
-        guard let duration = currentTrack?.duration, duration.isFinite, duration > 0 else { return }
+        guard let duration = playbackDuration, duration.isFinite, duration > 0 else { return }
         let seconds = min(duration, max(0, progress * duration))
         player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-        elapsed = seconds
-        updateSpectrum()
+        clock.update(elapsed: seconds, progress: progressValue(for: seconds))
     }
 
     func setVolume(_ value: Double) {
@@ -221,15 +237,10 @@ final class PlayerEngine: ObservableObject {
     }
 
     var remainingText: String {
-        guard let duration = currentTrack?.duration, duration.isFinite else { return "(--:--)" }
-        let remaining = max(0, duration - elapsed)
+        guard let duration = playbackDuration, duration.isFinite else { return "(--:--)" }
+        let remaining = max(0, duration - clock.elapsed)
         let total = Int(remaining.rounded())
         return "(\(total / 60):\(String(format: "%02d", total % 60)))"
-    }
-
-    var elapsedText: String {
-        let total = max(0, Int(elapsed.rounded()))
-        return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
 
     @objc private func playerDidFinish() {
@@ -238,6 +249,27 @@ final class PlayerEngine: ObservableObject {
         } else {
             next()
         }
+    }
+
+    private func syncElapsedFromPlayer() {
+        guard let currentTime = player?.currentTime().seconds, currentTime.isFinite else { return }
+        let elapsed = max(0, currentTime)
+        clock.update(elapsed: elapsed, progress: progressValue(for: elapsed))
+    }
+
+    private func progressValue(for elapsed: TimeInterval) -> Double {
+        guard let duration = playbackDuration, duration.isFinite, duration > 0 else { return 0 }
+        return min(1, max(0, elapsed / duration))
+    }
+
+    private var playbackDuration: TimeInterval? {
+        if let duration = currentTrack?.duration, duration.isFinite, duration > 0 {
+            return duration
+        }
+        guard let seconds = player?.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 else {
+            return nil
+        }
+        return seconds
     }
 
     private func makePlayerItem(for track: Track) -> AVPlayerItem {
@@ -254,64 +286,6 @@ final class PlayerEngine: ObservableObject {
             ]
         )
         return AVPlayerItem(asset: asset)
-    }
-
-    private func analyze(_ track: Track) {
-        analysisTask?.cancel()
-        guard track.url.isFileURL else {
-            amplitudeEnvelope = []
-            return
-        }
-        let url = track.url
-        let authorizationHeader = track.authorizationHeader
-        analysisTask = Task.detached(priority: .utility) {
-            let envelope = await AudioEnvelopeAnalyzer.analyze(url: url, authorizationHeader: authorizationHeader)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self.amplitudeEnvelope = envelope
-                self.updateSpectrum()
-            }
-        }
-    }
-
-    private func updateSpectrum() {
-        guard isPlaying else { return }
-        if amplitudeEnvelope.isEmpty {
-            spectrumLevels = fallbackSpectrum(at: elapsed)
-            return
-        }
-
-        let center = elapsed * envelopeRate
-        let targetLevels = (0..<spectrumBarCount).map { index in
-            let offset = Double(index - spectrumBarCount / 2) * 0.52
-            let amplitude = interpolatedEnvelope(at: center + offset)
-            let shaped = pow(amplitude, 0.62)
-            let spread = 0.88 + 0.12 * sin(Double(index) * 0.9 + elapsed * 3.2)
-            return min(1, max(0.10, shaped * spread))
-        }
-
-        spectrumLevels = zip(spectrumLevels, targetLevels).map { current, target in
-            current * 0.58 + target * 0.42
-        }
-    }
-
-    private func interpolatedEnvelope(at position: Double) -> Double {
-        guard !amplitudeEnvelope.isEmpty else { return 0 }
-        let clamped = min(Double(amplitudeEnvelope.count - 1), max(0, position))
-        let lowerIndex = Int(clamped.rounded(.down))
-        let upperIndex = min(amplitudeEnvelope.count - 1, lowerIndex + 1)
-        let fraction = clamped - Double(lowerIndex)
-        let lower = amplitudeEnvelope[lowerIndex]
-        let upper = amplitudeEnvelope[upperIndex]
-        return lower + (upper - lower) * fraction
-    }
-
-    private func fallbackSpectrum(at time: TimeInterval) -> [Double] {
-        (0..<spectrumBarCount).map { index in
-            let wave = sin(time * 5.4 + Double(index) * 0.56)
-            let second = sin(time * 2.1 + Double(index) * 0.18)
-            return min(0.72, max(0.10, 0.30 + wave * 0.14 + second * 0.08))
-        }
     }
 }
 
@@ -352,85 +326,5 @@ private enum SystemOutputVolume {
         )
         let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device)
         return status == noErr ? device : AudioObjectID(kAudioObjectUnknown)
-    }
-}
-
-private enum AudioEnvelopeAnalyzer {
-    static func analyze(url: URL, authorizationHeader: String?) async -> [Double] {
-        let asset: AVURLAsset
-        if let authorizationHeader {
-            asset = AVURLAsset(
-                url: url,
-                options: [
-                    "AVURLAssetHTTPHeaderFieldsKey": [
-                        "Authorization": authorizationHeader
-                    ]
-                ]
-            )
-        } else {
-            asset = AVURLAsset(url: url)
-        }
-
-        do {
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let audioTrack = tracks.first else { return [] }
-            let reader = try AVAssetReader(asset: asset)
-            let settings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVLinearPCMIsFloatKey: true,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsNonInterleaved: false
-            ]
-            let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: settings)
-            output.alwaysCopiesSampleData = false
-            guard reader.canAdd(output) else { return [] }
-            reader.add(output)
-            guard reader.startReading() else { return [] }
-
-            var envelope: [Double] = []
-            var windowSquares: Double = 0
-            var windowSamples = 0
-            let samplesPerWindow = 1_470
-            let maxWindows = 80_000
-
-            while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
-                guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
-                let length = CMBlockBufferGetDataLength(blockBuffer)
-                var data = Data(count: length)
-                data.withUnsafeMutableBytes { rawBuffer in
-                    if let baseAddress = rawBuffer.baseAddress {
-                        CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length, destination: baseAddress)
-                    }
-                }
-
-                data.withUnsafeBytes { rawBuffer in
-                    let samples = rawBuffer.bindMemory(to: Float.self)
-                    for sample in samples {
-                        let value = Double(sample)
-                        windowSquares += value * value
-                        windowSamples += 1
-                        if windowSamples >= samplesPerWindow {
-                            envelope.append(sqrt(windowSquares / Double(windowSamples)))
-                            windowSquares = 0
-                            windowSamples = 0
-                            if envelope.count >= maxWindows {
-                                reader.cancelReading()
-                                break
-                            }
-                        }
-                    }
-                }
-            }
-
-            if windowSamples > 0 {
-                envelope.append(sqrt(windowSquares / Double(windowSamples)))
-            }
-
-            let peak = envelope.max() ?? 0
-            guard peak > 0 else { return [] }
-            return envelope.map { min(1, $0 / peak) }
-        } catch {
-            return []
-        }
     }
 }

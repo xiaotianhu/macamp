@@ -248,33 +248,39 @@ final class LibraryStore: ObservableObject {
 
         metadataTask?.cancel()
         metadataTask = Task.detached(priority: .background) { [weak self] in
+            var updates: [(id: String, metadata: AudioMetadataReader.Metadata)] = []
             for item in pending {
                 guard !Task.isCancelled else { break }
                 let metadata = await AudioMetadataReader.read(url: item.url, authorizationHeader: item.authHeader)
                 guard !Task.isCancelled else { break }
-                await MainActor.run { [weak self] in
-                    self?.updateTrackMetadata(id: item.id, metadata: metadata)
-                }
+                updates.append((id: item.id, metadata: metadata))
+            }
+            guard !Task.isCancelled else { return }
+            let collected = updates
+            await MainActor.run { [weak self] in
+                self?.batchUpdateTrackMetadata(collected)
             }
         }
     }
 
-    private func updateTrackMetadata(id: String, metadata: AudioMetadataReader.Metadata) {
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
-        let old = tracks[index]
-        tracks[index] = Track(
-            id: old.id,
-            title: old.title,
-            artist: old.artist,
-            album: old.album,
-            year: old.year,
-            duration: metadata.duration,
-            bitRate: metadata.bitRate,
-            sampleRate: metadata.sampleRate,
-            url: old.url,
-            sourceID: old.sourceID,
-            authorizationHeader: old.authorizationHeader
-        )
+    private func batchUpdateTrackMetadata(_ updates: [(id: String, metadata: AudioMetadataReader.Metadata)]) {
+        for update in updates {
+            guard let index = tracks.firstIndex(where: { $0.id == update.id }) else { continue }
+            let old = tracks[index]
+            tracks[index] = Track(
+                id: old.id,
+                title: old.title,
+                artist: old.artist,
+                album: old.album,
+                year: old.year,
+                duration: update.metadata.duration,
+                bitRate: update.metadata.bitRate,
+                sampleRate: update.metadata.sampleRate,
+                url: old.url,
+                sourceID: old.sourceID,
+                authorizationHeader: old.authorizationHeader
+            )
+        }
     }
 }
 
