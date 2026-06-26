@@ -264,9 +264,9 @@ private struct MeterPanel: View {
 
 private struct DotMatrixText: View {
     let text: String
-    private let dotSize: CGFloat = 3.8
-    private let dotSpacing: CGFloat = 2.8
-    private let characterSpacing: CGFloat = 5
+    private let dotSize: CGFloat = 4.4
+    private let dotSpacing: CGFloat = 1.4
+    private let characterSpacing: CGFloat = 4
 
     var body: some View {
         HStack(alignment: .center, spacing: characterSpacing) {
@@ -274,6 +274,8 @@ private struct DotMatrixText: View {
                 DotMatrixGlyph(character: character, dotSize: dotSize, dotSpacing: dotSpacing)
             }
         }
+        .contentTransition(.opacity)
+        .animation(.easeOut(duration: 0.16), value: text)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }
@@ -306,7 +308,7 @@ private struct DotMatrixGlyph: View {
         case "9":
             return ["01110", "10001", "10001", "01111", "00001", "00001", "01110"]
         case ":":
-            return ["0", "1", "1", "0", "1", "1", "0"]
+            return ["0", "1", "0", "0", "1", "0", "0"]
         default:
             return ["000", "000", "000", "000", "000", "000", "000"]
         }
@@ -317,8 +319,8 @@ private struct DotMatrixGlyph: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(spacing: dotSpacing) {
                     ForEach(Array(row.enumerated()), id: \.offset) { _, value in
-                        Circle()
-                            .fill(value == "1" ? .white : .clear)
+                        Rectangle()
+                            .fill(value == "1" ? .white : .white.opacity(0.08))
                             .frame(width: dotSize, height: dotSize)
                     }
                 }
